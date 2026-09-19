@@ -1,13 +1,17 @@
-# Candidate generation for Avito services
+# Генерация кандидатов для сервисов Avito
 
-This repository produces an `answer.csv` with up to 50 service listings for
-each query in the supplied benchmark. It uses only the three supplied Parquet
-files and local, open-source Python packages; it does not call an external API.
+Этот репозиторий формирует файл `answer.csv`, содержащий до 50 объявлений-кандидатов для каждого запроса из benchmark-набора.
 
-## Reproduce
+Решение использует только три предоставленных Parquet-файла и локальные open-source библиотеки Python. Внешние API не используются.
 
-Python 3.12 is recommended. Put `train.parquet`, `benchmark_items.parquet` and
-`benchmark_queries.parquet` in a data directory, then run:
+## Запуск
+Файлы:
+
+* `train.parquet`
+* `benchmark_items.parquet`
+* `benchmark_queries.parquet`
+
+в одну директорию с данными, после чего выполните:
 
 ```bash
 python3 -m venv .venv
@@ -15,54 +19,63 @@ python3 -m venv .venv
 .venv/bin/python solution.py --data-dir /path/to/data --output answer.csv
 ```
 
-The script fixes all tie handling and uses no randomness at inference time.
-For a local proxy evaluation, run:
+В результате будет создан файл `answer.csv`.
+
+Решение детерминировано: при инференсе не используется случайность, а обработка совпадающих score фиксирована.
+
+Для локальной оценки можно запустить:
 
 ```bash
-.venv/bin/python solution.py --data-dir /path/to/data --validate --validation-count 500
+.venv/bin/python solution.py \
+  --data-dir /path/to/data \
+  --validate \
+  --validation-count 500
 ```
 
-## Approach
+## Подход
 
-The retrieval index consists of three sparse TF-IDF matrices built over the
-benchmark corpus: title word unigrams/bigrams, title character 3–5-grams and
-word unigrams/bigrams from a compact combination of title, item parameters and
-description. Character grams tolerate spelling and inflection differences;
-the body index catches services described outside the title. The query text
-is scored against all three, so the index can retrieve listings absent from
-training.
+Для retrieval используются три разреженные TF-IDF матрицы, построенные по объявлениям из benchmark:
 
-The training clicks provide aggregate priors for the search location and the
-listing's microcategory. We store distributions, not query-specific answer
-lists. For unseen query wording, nearby historical queries in character TF-IDF
-space provide a weak microcategory prior. The final score blends lexical
-similarity with these priors. A large location multiplier reflects the strong
-location match in observed clicks.
+1. word TF-IDF по заголовкам с униграммами и биграммами;
+2. character TF-IDF по заголовкам с 3–5-граммами;
+3. word TF-IDF по объединению заголовка, параметров объявления и описания.
 
-Only the following fields influence retrieval: `search_query`,
-`search_location_id`, `item_title_raw`, `item_description_raw`,
-`item_infm_params_text`, `item_location_id` and `item_microcat_id`. The corpus
-`item_id` values are preserved as strings. Rating, price and contact settings
-are not used, because candidate generation prioritizes recall over ordering.
+Символьные n-граммы помогают учитывать опечатки, различия в написании и словоформах. Индекс по описанию и параметрам позволяет находить объявления, в которых нужная услуга не указана непосредственно в заголовке.
 
-## Validation and error analysis
+Запрос сравнивается со всеми тремя индексами, поэтому система может находить подходящие объявления даже в тех случаях, когда они отсутствовали в обучающих взаимодействиях.
 
-The `--validate` mode samples historical clicked items that are also present
-in the benchmark corpus and removes those query/item interactions from the
-history priors. It reports a click-level Recall@50 proxy and results by seen
-query text and location match. This proxy is not the hidden benchmark metric:
-the hidden benchmark can contain multiple relevant items per query and a
-different query mix.
+История кликов используется для построения дополнительных prior-признаков:
 
-With random seed 42 and 500 held-out interactions, the selected weights gave
-**0.768 click-level Recall@50**. The held-out breakdown was 0.797 for seen
-queries with the same location, 0.815 for unseen queries with the same
-location, 0.676 for seen queries with a different location and 0.412 for
-unseen queries with a different location. The final configuration weights
-location 12.0, microcategory 0.2 and body text 1.0.
+* соответствие локации поиска и объявления;
+* распределение по микрокатегориям;
+* похожие исторические запросы для ранее не встречавшихся формулировок.
 
-Observed error types include descriptions where the service is absent from the
-title, spelling or case variation between query and listing, and listings in
-a nearby rather than identical location. The body index, character grams and
-location priors respectively address those cases. The code comments document
-the feature construction and held-out split.
+Для неизвестных текстов запросов используется поиск ближайших исторических запросов в character TF-IDF пространстве и слабый prior по микрокатегории.
+
+Финальный score объединяет текстовую релевантность и исторические признаки. Локация имеет повышенный вес, так как в наблюдаемых кликах совпадение по местоположению оказалось особенно значимым.
+
+Значения `item_id` сохраняются в исходном строковом формате.
+
+Цена, рейтинг и настройки контактов не используются, поскольку задача candidate generation ориентирована прежде всего на **Recall**, а не на финальное ранжирование.
+
+Используемые веса финальной конфигурации:
+
+* location — `12.0`
+* microcategory — `0.2`
+* body text — `1.0`
+
+## Анализ ошибок
+
+Основные наблюдаемые типы ошибок:
+
+* услуга описана в тексте объявления, но отсутствует в заголовке;
+* различия в регистре, написании или словоформах;
+* подходящее объявление находится в соседней, а не идентичной локации.
+
+Для этих случаев используются соответственно:
+
+* TF-IDF индекс по описанию и параметрам;
+* character n-grams;
+* location priors.
+
+Детали построения признаков и validation split также описаны в комментариях исходного кода.
